@@ -2,6 +2,7 @@ package projection
 
 import spark.SparkContext
 import SparkContext._
+import spark.storage.StorageLevel
 
 /**
  * The naive, SQL like projection approach using an inner join
@@ -26,10 +27,8 @@ object JoinProjection {
     val parallel = 32
     val support = args(3).toInt
 
-    val workerConf = Map(("SPARK_MEM", "2g"))
-
     val sc = new SparkContext(args(0), "JoinProjection",
-      System.getenv("SPARK_HOME"), parseJars(jars), workerConf)
+      System.getenv("SPARK_HOME"), parseJars(jars))
 
     val raw = sc.textFile(hdfs+userPath+inputPath)
     // val raw = sc.parallelize(LocalLoader.loadFile("target/scala-2.9.2/msd_test"))
@@ -52,7 +51,7 @@ object JoinProjection {
       pair => pair._2 >= support
     )
 
-    // projected.cache()
+    // projected.persist(StorageLevel.MEMORY_AND_DISK)
     println(projected.count)
     // projected.saveAsTextFile(hdfs+outputPath)
   }
