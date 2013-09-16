@@ -82,7 +82,7 @@ object BotifyItw {
   }
 
   def h1PercentageByFirstDir(sc: SparkContext, content: RDD[String],
-                             firstDir: RDD[(Int,String)]) = {
+                             firstDir: RDD[(Int, String)]) = {
     // filter only for h1 then map with urlids
     val urlWithH1 = content.filter(
       // 1 is the column of content type, 2 stands for h1
@@ -111,9 +111,47 @@ object BotifyItw {
     resultMap
   }
 
+  def linkRelationshipByFirstDir(sc: SparkContext,
+                                 links: RDD[String],
+                                 firstDir: RDD[(Int, String)]) = {
+    // use a global lookup table, spark does not support nested-RDD
+    // urlid (int) -> first directory (string)
+    val firstDirUrlMap = firstDir.collectAsMap()
+
+    // map links to (first directory, dest urlid) pairs
+    val linkRelationship = links.map(
+      line => {
+        val lineSplit = line.split("\t")
+        val from = lineSplit(2).toInt
+        val to = lineSplit(3).toInt
+        (firstDirUrlMap.getOrElse(from, "unknown"), to)      // for q6
+        // (firstDirUrlMap.getOrElse(to, "external"), from)  // for q7
+      }
+    )
+    // group up by first directory
+    // result is (first directory, [urlids ...])
+    val groupBySrc = linkRelationship.groupByKey
+
+    // replace dest urlids with its first directory by using lookup table
+    // then do a local groupby in the list
+    val resultMap = groupBySrc.map {
+      case (k, s) => {
+        // if a dest url can't be looked up, then it's a external link
+        val ss = s.map(k => firstDirUrlMap.getOrElse(k, "external"))
+        (k, ss.groupBy(p => p).map{ case (kk,vv) => kk -> vv.size })
+      }
+    }
+
+    resultMap
+  }
+
+
   // Helpers
   def parseJars(jars: String) = {
-    jars.split(",").toSeq
+    jars match {
+      case "" => Seq.empty[String]
+      case _ => jars.split(",").toSeq
+    }
   }
 
   def outputMap(m: Map[_, _], path: String) = {
@@ -127,6 +165,19 @@ object BotifyItw {
     writer.close()
   }
 
+  def outputNestedMap(m: Iterable[(_, Map[_, _])], path: String) = {
+    import java.io._
+    val writer = new PrintWriter(new File(path))
+    m.foreach {
+      case (k,v) => {
+        v.foreach {
+          case (kk, vv) => writer.write(k+"\t"+kk+"\t"+vv+"\n")
+        }
+      }
+    }
+    writer.close()
+  }
+
   def main(args: Array[String]) {
     if (args.length < 5) {
       System.err.println(
@@ -134,23 +185,31 @@ object BotifyItw {
       System.exit(1)
     }
 
-    val inputDir= args(1)
-    val outputDir = args(2)
+    val inputPath = args(1)
+    val outputPath = args(2)
     val op = args(3).toInt
     val jars = args(4)
 
     val sc = new SparkContext(args(0), "BotifyItw",
       System.getenv("SPARK_HOME"), parseJars(jars))
 
-    val urlinfos = sc.textFile(inputDir+"/urlinfos")
-    val urlids = sc.textFile(inputDir+"/urlids")
-    val content = sc.textFile(inputDir+"content")
+    val urlinfos = sc.textFile(inputPath+"urlinfos.txt")
+    val urlids = sc.textFile(inputPath+"urlids.txt")
+    val content = sc.textFile(inputPath+"content.txt")
+    val links = sc.textFile(inputPath+"links.txt")
 
-
-    // pagesByHttpCode(sc, urlinfos).saveAsTextFile(outputDir+"res_httpcode")
-    // pagesByResponseTime(sc, urlinfos).saveAsTextFile(outputDir+"res_responsetime")
-    // responseTimeByFirstDir(sc, urlids, urlinfos).saveAsTextFile(outputDir+"res_averagetime")
-    outputMap(h1PercentageByFirstDir(sc, content, urlidWithFirstDir(sc, urlids)),
-      outputDir+"res_filledh1")
+    op match {
+      case 1 => pagesByHttpCode(sc, urlinfos)
+        .saveAsTextFile(outputPath+"res_httpcode")
+      case 2 => pagesByResponseTime(sc, urlinfos)
+        .saveAsTextFile(outputPath+"res_responsetime")
+      case 3 => responseTimeByFirstDir(sc, urlids, urlinfos)
+        .saveAsTextFile(outputPath+"res_averagetime")
+      case 4 | 5 => outputMap(h1PercentageByFirstDir(sc, content, urlidWithFirstDir(sc, urlids)),
+        outputPath+"res_filledh1")
+      case 6 | 7 => outputNestedMap(
+        linkRelationshipByFirstDir(sc, links, urlidWithFirstDir(sc, urlids)).collect(),
+        outputPath+"res_outbound")
+    }
   }
 }
