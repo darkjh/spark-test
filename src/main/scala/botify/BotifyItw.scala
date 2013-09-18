@@ -6,6 +6,11 @@ import scala.collection.Map
 
 /**
  * Some simple Spark jobs for Botify
+ *
+ * TODO type aliases, ex. type url = int
+ * TODO better way to organize code
+ * TODO unit testing with a mocked crawl data
+ * TODO test diff. ways of output, maybe a custom outputFormat
  */
 object BotifyItw {
 
@@ -39,7 +44,7 @@ object BotifyItw {
     )
   }
 
-  private def urlidWithFirstDir(sc: SparkContext, urlids: RDD[String]) = {
+  def urlidWithFirstDir(sc: SparkContext, urlids: RDD[String]) = {
     // regex to extract first directory
     val pattern =  """^(/[^/]*/?).*""".r
 
@@ -122,8 +127,8 @@ object BotifyItw {
 
   // TODO master
   def linkRelationByFirstDir(sc: SparkContext,
-                                 links: RDD[String],
-                                 firstDir: RDD[(Int, String)]) = {
+                             links: RDD[String],
+                             firstDir: RDD[(Int, String)]) = {
     // use a global lookup table, spark does not support nested-RDD
     // urlid (int) -> first directory (string)
     val firstDirUrlMap = firstDir.collectAsMap()
@@ -191,30 +196,6 @@ object BotifyItw {
     }
   }
 
-  def outputMap(m: Map[_, _], path: String) = {
-    import java.io._
-    val writer = new PrintWriter(new File(path))
-    m.foreach {
-      case (k,v) => {
-        writer.write(k+"\t"+v+"\n")
-      }
-    }
-    writer.close()
-  }
-
-  def outputNestedMap(m: Iterable[(_, Map[_, _])], path: String) = {
-    import java.io._
-    val writer = new PrintWriter(new File(path))
-    m.foreach {
-      case (k,v) => {
-        v.foreach {
-          case (kk, vv) => writer.write(k+"\t"+kk+"\t"+vv+"\n")
-        }
-      }
-    }
-    writer.close()
-  }
-
   // process all operations in an efficient way
   def processAll(sc: SparkContext,
                  outputPath: String,
@@ -259,19 +240,18 @@ object BotifyItw {
     val content = sc.textFile(inputPath+"content.txt")
     val links = sc.textFile(inputPath+"links.txt")
 
-//    op match {
-//      case 1 => pagesByHttpCode(sc, urlinfos)
-//        .saveAsTextFile(outputPath+"res_httpcode")
-//      case 2 => pagesByResponseTime(sc, urlinfos)
-//        .saveAsTextFile(outputPath+"res_responsetime")
-//      case 3 => responseTimeByFirstDir(sc, urlids, urlinfos, urlidWithFirstDir(sc, urlids))
-//        .saveAsTextFile(outputPath+"res_averagetime")
-//      case 4 | 5 => outputMap(h1PercentageByFirstDir(sc, content, urlidWithFirstDir(sc, urlids)),
-//        outputPath+"res_filledh1")
-//      case 6 | 7 => outputNestedMap(
-//        linkRelationshipByFirstDir(sc, links, urlidWithFirstDir(sc, urlids)).collect(),
-//        outputPath+"res_outbound")
-//    }
-    processAll(sc, outputPath, urlinfos, urlids, content, links)
+    op match {
+      case 0 => processAll(sc, outputPath, urlinfos, urlids, content, links)
+      case 1 => pagesByHttpCode(sc, urlinfos)
+        .saveAsTextFile(outputPath+"res_httpcode")
+      case 2 => pagesByResponseTime(sc, urlinfos)
+        .saveAsTextFile(outputPath+"res_responsetime")
+      case 3 => responseTimeByFirstDir(sc, urlids, urlinfos, urlidWithFirstDir(sc, urlids))
+        .saveAsTextFile(outputPath+"res_averagetime")
+      case 4 | 5 => h1PercentageByFirstDir(sc, content, urlidWithFirstDir(sc, urlids)).
+        saveAsTextFile(outputPath+"res_filledh1")
+      case 6 | 7 => linkRelationByFirstDir(sc, links, urlidWithFirstDir(sc, urlids)).
+        saveAsTextFile(outputPath+"res_outbound")
+    }
   }
 }
