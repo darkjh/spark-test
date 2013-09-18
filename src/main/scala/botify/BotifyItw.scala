@@ -88,31 +88,36 @@ object BotifyItw {
                              content: RDD[String],
                              firstDir: RDD[(Int, String)]) = {
     // filter only for h1 then map with urlids
-    val urlWithH1 = content.filter(
-      // 1 is the column of content type, 2 stands for h1
-      line => line.split("\t")(1).toInt == 2
-    ).map(
+    val urlWithH1 = content.map {
       line => {
         try {
           val lineSplit = line.split("\t")
           val urlid = lineSplit(0).toInt
-          // val h1 = lineSplit(3)
-          (urlid, 1)
+          val tagType = lineSplit(1).toInt
+          tagType match {
+            case 2 => (urlid, 1)  // 2 stands for h1 tag
+            case _ => (-1 , -1)
+          }
         } catch {
-          case e: Exception => (-1, 1)
+          case e: Exception => (-1, -1)
         }
       }
-    ).distinct // multiple unique h1, repeated h1 are all considered only once
+    }.distinct()
 
     // join them up
-    val withH1CountsMap = firstDir.join(urlWithH1).map(_._2).countByKey
+    val fdWithH1Count = firstDir.join(urlWithH1).map(_._2).reduceByKey(_ + _)
     // count #urls for each first directory
-    val allCountsMap = firstDir.map(_.swap).countByKey // TODO master
-    val resultMap = withH1CountsMap.map {
-      case (k,v) => k -> v.toDouble / allCountsMap.get(k).get
+    val fdAllCountsMap = firstDir.map(p => (p._2, 1)).reduceByKey(_ + _)
+
+    val result = fdWithH1Count.join(fdAllCountsMap).map {
+      case (fd, (h1, all)) => {
+        (fd, h1.toDouble / all.toDouble)
+      }
     }
 
-    resultMap
+    result.map(
+      p => p._1+"\t"+p._2  // tsv formatting
+    )
   }
 
   // TODO master
@@ -228,7 +233,7 @@ object BotifyItw {
 
     responseTimeByFirstDir(sc, urlids, urlinfos, fd)
       .saveAsTextFile(outputPath+"fd_time")
-    outputMap(h1PercentageByFirstDir(sc, content, fd),
+    h1PercentageByFirstDir(sc, content, fd).saveAsTextFile(
       outputPath+"fd_h1")
     linkRelationByFirstDir(sc, links, fd).saveAsTextFile(
       outputPath+"fd_outbound")
