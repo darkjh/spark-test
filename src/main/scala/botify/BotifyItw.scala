@@ -13,7 +13,9 @@ object BotifyItw {
   def pagesByHttpCode(sc: SparkContext, urlinfos: RDD[String]) = {
     urlinfos.map(
       line => (line.split("\t")(3), 1) // 3 is http code column
-    ).reduceByKey(_ + _)
+    ).reduceByKey(_ + _).map(
+      p => p._1+"\t"+p._2  // tsv formatting
+    )
   }
 
   def pagesByResponseTime(sc: SparkContext, urlinfos: RDD[String]) = {
@@ -32,10 +34,12 @@ object BotifyItw {
         else
           (4, 1)
       }
-    ).reduceByKey(_ + _)
+    ).reduceByKey(_ + _).map(
+      p => p._1+"\t"+p._2  // tsv formatting
+    )
   }
 
-  def urlidWithFirstDir(sc: SparkContext, urlids: RDD[String]) = {
+  private def urlidWithFirstDir(sc: SparkContext, urlids: RDD[String]) = {
     // regex to extract first directory
     val pattern =  """^(/[^/]*/?).*""".r
 
@@ -48,7 +52,7 @@ object BotifyItw {
           val Some(all) = pattern.findFirstMatchIn(path)
           (urlid, all.group(1).toLowerCase)
         } catch {
-          case e: Exception => (-1, "")
+          case e: Exception => (-1, "unknown")
         }
       }
     )
@@ -56,11 +60,8 @@ object BotifyItw {
 
   def responseTimeByFirstDir(sc: SparkContext,
                              urlids: RDD[String],
-                             urlinfos: RDD[String]) = {
-    // map urls with its first directory
-    // (urlid, firstDir)
-    val firstDir = urlidWithFirstDir(sc, urlids)
-
+                             urlinfos: RDD[String],
+                             firstDir: RDD[(Int, String)]) = {
     // map urls with its average delay in ms
     // (urlid, delay)
     val urlDelay = urlinfos.map(
@@ -78,10 +79,13 @@ object BotifyItw {
       pair => (pair._1, pair._2.sum / pair._2.size)
     )
 
-    averageDelay
+    averageDelay.map(
+      p => p._1+"\t"+p._2  // tsv formatting
+    )
   }
 
-  def h1PercentageByFirstDir(sc: SparkContext, content: RDD[String],
+  def h1PercentageByFirstDir(sc: SparkContext,
+                             content: RDD[String],
                              firstDir: RDD[(Int, String)]) = {
     // filter only for h1 then map with urlids
     val urlWithH1 = content.filter(
@@ -95,7 +99,7 @@ object BotifyItw {
           // val h1 = lineSplit(3)
           (urlid, 1)
         } catch {
-          case e: Exception => (-1, "")
+          case e: Exception => (-1, 1)
         }
       }
     ).distinct // multiple unique h1, repeated h1 are all considered only once
@@ -103,7 +107,7 @@ object BotifyItw {
     // join them up
     val withH1CountsMap = firstDir.join(urlWithH1).map(_._2).countByKey
     // count #urls for each first directory
-    val allCountsMap = firstDir.map(_.swap).countByKey
+    val allCountsMap = firstDir.map(_.swap).countByKey // TODO master
     val resultMap = withH1CountsMap.map {
       case (k,v) => k -> v.toDouble / allCountsMap.get(k).get
     }
@@ -111,7 +115,8 @@ object BotifyItw {
     resultMap
   }
 
-  def linkRelationshipByFirstDir(sc: SparkContext,
+  // TODO master
+  def linkRelationByFirstDir(sc: SparkContext,
                                  links: RDD[String],
                                  firstDir: RDD[(Int, String)]) = {
     // use a global lookup table, spark does not support nested-RDD
@@ -142,9 +147,36 @@ object BotifyItw {
       }
     }
 
-    resultMap
+    resultMap.map {
+      case (src, m) => {
+        val sb = new StringBuilder
+        m.foreach {
+          case (k, v) => sb.append(src+"\t"+k.toString+"\t"+v.toString+"\n")
+        }
+        sb.deleteCharAt(sb.size - 1)
+        sb.toString()
+      }
+    }
   }
 
+//  def q7(sc: SparkContext,
+//         links: RDD[String],
+//         firstDir: RDD[(Int, String)]) = {
+//    val l = links.map(f = line => {
+//      val lineSplit = line.split("\t")
+//      val from = lineSplit(2).toInt
+//      val to = lineSplit(3).toInt
+//      (from, to)
+//    })
+//
+//    // (fd in, fd out)
+//    val firstDirRelations = l.join(firstDir).map(_._2).join(firstDir).map(_._2)
+//    firstDirRelations.groupByKey().map {
+//      case (k, s) => {
+//        (k, s.groupBy(p => p).map{ case (kk,vv) => kk -> vv.size })
+//      }
+//    }
+//  }
 
   // Helpers
   def parseJars(jars: String) = {
@@ -178,6 +210,30 @@ object BotifyItw {
     writer.close()
   }
 
+  // process all operations in an efficient way
+  def processAll(sc: SparkContext,
+                 outputPath: String,
+                 urlinfos: RDD[String],
+                 urlids: RDD[String],
+                 content: RDD[String],
+                 links: RDD[String]) = {
+    pagesByHttpCode(sc, urlinfos).saveAsTextFile(
+      outputPath+"http_code")
+    pagesByResponseTime(sc, urlinfos).saveAsTextFile(
+      outputPath+"response_time")
+
+    // cache fd for performance
+    val fd = urlidWithFirstDir(sc, urlids)
+    fd.cache()
+
+    responseTimeByFirstDir(sc, urlids, urlinfos, fd)
+      .saveAsTextFile(outputPath+"fd_time")
+    outputMap(h1PercentageByFirstDir(sc, content, fd),
+      outputPath+"fd_h1")
+    linkRelationByFirstDir(sc, links, fd).saveAsTextFile(
+      outputPath+"fd_outbound")
+  }
+
   def main(args: Array[String]) {
     if (args.length < 5) {
       System.err.println(
@@ -198,18 +254,19 @@ object BotifyItw {
     val content = sc.textFile(inputPath+"content.txt")
     val links = sc.textFile(inputPath+"links.txt")
 
-    op match {
-      case 1 => pagesByHttpCode(sc, urlinfos)
-        .saveAsTextFile(outputPath+"res_httpcode")
-      case 2 => pagesByResponseTime(sc, urlinfos)
-        .saveAsTextFile(outputPath+"res_responsetime")
-      case 3 => responseTimeByFirstDir(sc, urlids, urlinfos)
-        .saveAsTextFile(outputPath+"res_averagetime")
-      case 4 | 5 => outputMap(h1PercentageByFirstDir(sc, content, urlidWithFirstDir(sc, urlids)),
-        outputPath+"res_filledh1")
-      case 6 | 7 => outputNestedMap(
-        linkRelationshipByFirstDir(sc, links, urlidWithFirstDir(sc, urlids)).collect(),
-        outputPath+"res_outbound")
-    }
+//    op match {
+//      case 1 => pagesByHttpCode(sc, urlinfos)
+//        .saveAsTextFile(outputPath+"res_httpcode")
+//      case 2 => pagesByResponseTime(sc, urlinfos)
+//        .saveAsTextFile(outputPath+"res_responsetime")
+//      case 3 => responseTimeByFirstDir(sc, urlids, urlinfos, urlidWithFirstDir(sc, urlids))
+//        .saveAsTextFile(outputPath+"res_averagetime")
+//      case 4 | 5 => outputMap(h1PercentageByFirstDir(sc, content, urlidWithFirstDir(sc, urlids)),
+//        outputPath+"res_filledh1")
+//      case 6 | 7 => outputNestedMap(
+//        linkRelationshipByFirstDir(sc, links, urlidWithFirstDir(sc, urlids)).collect(),
+//        outputPath+"res_outbound")
+//    }
+    processAll(sc, outputPath, urlinfos, urlids, content, links)
   }
 }
